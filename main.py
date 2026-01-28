@@ -8,14 +8,12 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import requests
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import xgboost as xgb
 import lightgbm as lgb
 from prophet import Prophet
 from statsmodels.tsa.arima.model import ARIMA
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -68,30 +66,162 @@ st.markdown("""
         background: linear-gradient(135deg, #FFA500 0%, #FFD700 100%);
         transform: scale(1.05);
     }
+    .api-badge {
+        display: inline-block;
+        background: rgba(255, 255, 255, 0.2);
+        padding: 4px 12px;
+        border-radius: 12px;
+        font-size: 12px;
+        margin: 2px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Cache functions
+# API Functions
+@st.cache_data(ttl=180)  # Cache 3 menit
+def get_current_gold_price():
+    """Mengambil harga emas terkini dari berbagai API gratis"""
+    apis_tried = []
+    
+    # 1. Gold-API.com (NO KEY NEEDED - Best option)
+    try:
+        apis_tried.append("Gold-API.com")
+        response = requests.get('https://www.gold-api.com/api/XAU/USD', timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if 'price' in data:
+                return {
+                    'price': data['price'],
+                    'source': 'Gold-API.com',
+                    'timestamp': data.get('timestamp', datetime.now().isoformat()),
+                    'success': True
+                }
+    except Exception as e:
+        st.warning(f"Gold-API.com gagal: {str(e)}")
+    
+    # 2. API Ninjas (Need free API key - sign up at api-ninjas.com)
+    # Uncomment and add your key if you want to use it
+    # try:
+    #     apis_tried.append("API-Ninjas")
+    #     headers = {'X-Api-Key': 'YOUR_API_KEY_HERE'}
+    #     response = requests.get('https://api.api-ninjas.com/v1/goldprice', headers=headers, timeout=5)
+    #     if response.status_code == 200:
+    #         data = response.json()
+    #         return {
+    #             'price': data['price'],
+    #             'source': 'API-Ninjas',
+    #             'timestamp': data.get('timestamp', datetime.now().isoformat()),
+    #             'success': True
+    #         }
+    # except:
+    #     pass
+    
+    # 3. Fallback ke Yahoo Finance
+    try:
+        apis_tried.append("Yahoo Finance")
+        gold = yf.Ticker("GC=F")
+        hist = gold.history(period="1d")
+        if len(hist) > 0:
+            return {
+                'price': hist['Close'].iloc[-1],
+                'source': 'Yahoo Finance (Futures)',
+                'timestamp': hist.index[-1].isoformat(),
+                'success': True
+            }
+    except Exception as e:
+        st.warning(f"Yahoo Finance gagal: {str(e)}")
+    
+    # 4. Last resort - Metal Price API (limited free tier)
+    try:
+        apis_tried.append("Free Metal API")
+        response = requests.get('https://api.metals.live/v1/spot/gold', timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                'price': data[0]['price'] if isinstance(data, list) else data.get('price', 0),
+                'source': 'Metals.Live',
+                'timestamp': datetime.now().isoformat(),
+                'success': True
+            }
+    except:
+        pass
+    
+    return {
+        'price': None,
+        'source': 'None (APIs failed)',
+        'timestamp': datetime.now().isoformat(),
+        'success': False,
+        'tried': apis_tried
+    }
+
 @st.cache_data(ttl=300)
 def get_gold_data(period="2y"):
-    """Mengambil data harga emas dari Yahoo Finance"""
+    """Mengambil data historis harga emas"""
     try:
-        gold = yf.Ticker("GC=F")  # Gold Futures
+        # Primary: Yahoo Finance for historical
+        gold = yf.Ticker("GC=F")
         data = gold.history(period=period)
-        return data
-    except:
-        st.error("Gagal mengambil data dari Yahoo Finance")
-        return None
+        
+        if len(data) == 0:
+            st.error("Tidak ada data historis")
+            return None
+        
+        # Try to update current price with more accurate API
+        current_data = get_current_gold_price()
+        if current_data['success'] and current_data['price']:
+            last_date = data.index[-1]
+            today = pd.Timestamp.now(tz=last_date.tz)
+            
+            # Only update if data is from today
+            if (today.date() - last_date.date()).days == 0:
+                # Update last row
+                data.loc[last_date, 'Close'] = current_data['price']
+                data.loc[last_date, 'High'] = max(data.loc[last_date, 'High'], current_data['price'])
+                data.loc[last_date, 'Low'] = min(data.loc[last_date, 'Low'], current_data['price'])
+            else:
+                # Add new row for today if missing
+                new_row = pd.DataFrame({
+                    'Open': [current_data['price']],
+                    'High': [current_data['price']],
+                    'Low': [current_data['price']],
+                    'Close': [current_data['price']],
+                    'Volume': [0],
+                    'Dividends': [0],
+                    'Stock Splits': [0]
+                }, index=[today])
+                data = pd.concat([data, new_row])
+        
+        return data, current_data.get('source', 'Yahoo Finance')
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        return None, None
 
 @st.cache_data(ttl=300)
 def get_exchange_rate():
-    """Mengambil kurs USD to IDR"""
+    """Mengambil kurs USD to IDR dari API gratis"""
+    apis = [
+        'https://api.exchangerate-api.com/v4/latest/USD',
+        'https://open.er-api.com/v6/latest/USD',
+        'https://api.exchangerate.host/latest?base=USD'
+    ]
+    
+    for api_url in apis:
+        try:
+            response = requests.get(api_url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if 'rates' in data and 'IDR' in data['rates']:
+                    return data['rates']['IDR'], api_url.split('/')[2]
+        except:
+            continue
+    
+    # Fallback to Yahoo Finance
     try:
         usd_idr = yf.Ticker("USDIDR=X")
         rate = usd_idr.info.get('regularMarketPrice', 15500)
-        return rate
+        return rate, 'Yahoo Finance'
     except:
-        return 15500  # Default fallback
+        return 15500, 'Default'
 
 def prepare_features(data, lookback=30):
     """Menyiapkan features untuk ML models"""
@@ -130,8 +260,9 @@ def prepare_features(data, lookback=30):
         df[f'Lag_{i}'] = df['Close'].shift(i)
     
     # Volume features
-    df['Volume_MA'] = df['Volume'].rolling(window=20).mean()
-    df['Volume_Ratio'] = df['Volume'] / df['Volume_MA']
+    if 'Volume' in df.columns:
+        df['Volume_MA'] = df['Volume'].rolling(window=20).mean()
+        df['Volume_Ratio'] = df['Volume'] / df['Volume_MA']
     
     # Time features
     df['Day'] = df.index.day
@@ -166,7 +297,7 @@ def train_ensemble_model(data, forecast_days=30):
     # Train multiple models
     models = {
         'XGBoost': xgb.XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=7, random_state=42),
-        'LightGBM': lgb.LGBMRegressor(n_estimators=200, learning_rate=0.05, max_depth=7, random_state=42),
+        'LightGBM': lgb.LGBMRegressor(n_estimators=200, learning_rate=0.05, max_depth=7, random_state=42, verbose=-1),
         'RandomForest': RandomForestRegressor(n_estimators=200, max_depth=10, random_state=42),
         'GradientBoosting': GradientBoostingRegressor(n_estimators=200, learning_rate=0.05, max_depth=7, random_state=42)
     }
@@ -195,7 +326,11 @@ def train_ensemble_model(data, forecast_days=30):
     
     # Ensemble prediction (weighted average based on R2 score)
     weights = np.array([scores[name]['R2'] for name in models.keys()])
-    weights = weights / weights.sum()
+    weights = np.maximum(weights, 0)  # Ensure non-negative
+    if weights.sum() > 0:
+        weights = weights / weights.sum()
+    else:
+        weights = np.ones(len(models)) / len(models)
     
     ensemble_pred = np.zeros_like(predictions['XGBoost'])
     for i, name in enumerate(models.keys()):
@@ -233,7 +368,7 @@ def train_ensemble_model(data, forecast_days=30):
         
         # Update features for next prediction
         for i in range(29, 0, -1):
-            if f'Lag_{i}' in last_row.columns:
+            if f'Lag_{i}' in last_row.columns and f'Lag_{i+1}' in last_row.columns:
                 last_row[f'Lag_{i+1}'] = last_row[f'Lag_{i}'].values[0]
         last_row['Lag_1'] = future_pred
         
@@ -286,7 +421,7 @@ def train_arima_model(data, forecast_days=30):
         
         # Calculate in-sample accuracy
         predictions = fitted.fittedvalues
-        actual = prices[1:]  # ARIMA loses first observation
+        actual = prices[1:]
         mape = np.mean(np.abs((actual - predictions) / actual)) * 100
         accuracy = max(0, 100 - mape)
         
@@ -335,11 +470,12 @@ def create_price_chart(data, currency='USD', exchange_rate=1):
     )
     
     # Volume
-    colors = ['red' if row['Close'] < row['Open'] else 'green' for idx, row in df.iterrows()]
-    fig.add_trace(
-        go.Bar(x=df.index, y=df['Volume'], name='Volume', marker_color=colors),
-        row=2, col=1
-    )
+    if 'Volume' in df.columns:
+        colors = ['red' if row['Close'] < row['Open'] else 'green' for idx, row in df.iterrows()]
+        fig.add_trace(
+            go.Bar(x=df.index, y=df['Volume'], name='Volume', marker_color=colors),
+            row=2, col=1
+        )
     
     fig.update_layout(
         height=600,
@@ -441,14 +577,31 @@ def main():
         use_arima = st.checkbox("ARIMA", value=True)
         
         st.markdown("---")
+        st.markdown("### 🌐 Free APIs Used")
+        st.markdown("""
+        <div style='font-size: 11px;'>
+        ✅ Gold-API.com<br>
+        ✅ ExchangeRate-API<br>
+        ✅ Yahoo Finance<br>
+        <br>
+        <i>No API keys needed!</i>
+        </div>
+        """, unsafe_allow_html=True)
+        
         if st.button("🔄 Refresh Data"):
             st.cache_data.clear()
             st.rerun()
     
     # Get data
-    with st.spinner("Loading gold data..."):
-        data = get_gold_data(period)
-        exchange_rate = get_exchange_rate()
+    with st.spinner("Loading gold data from free APIs..."):
+        result = get_gold_data(period)
+        if result is not None:
+            data, data_source = result
+        else:
+            st.error("Gagal mengambil data harga emas")
+            return
+        
+        exchange_rate, exchange_source = get_exchange_rate()
     
     if data is None or len(data) == 0:
         st.error("Gagal mengambil data harga emas")
@@ -457,10 +610,24 @@ def main():
     # Section 1: Current Price & Historical Data
     st.header("📈 Current Gold Price & Historical Data")
     
+    # Show data sources
+    col_info1, col_info2 = st.columns([3, 1])
+    with col_info1:
+        st.markdown(f"""
+        <div style='background: rgba(255,255,255,0.1); padding: 10px; border-radius: 8px;'>
+        📡 <b>Data Sources:</b> 
+        <span class='api-badge'>💰 {data_source}</span>
+        <span class='api-badge'>💱 {exchange_source}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_info2:
+        current_time = datetime.now().strftime("%H:%M:%S")
+        st.markdown(f"<div style='text-align: right; color: white;'>🕐 {current_time}</div>", unsafe_allow_html=True)
+    
     current_price = data['Close'].iloc[-1]
-    prev_price = data['Close'].iloc[-2]
+    prev_price = data['Close'].iloc[-2] if len(data) > 1 else current_price
     change = current_price - prev_price
-    change_pct = (change / prev_price) * 100
+    change_pct = (change / prev_price) * 100 if prev_price != 0 else 0
     
     if currency == 'IDR':
         display_price = current_price * exchange_rate
@@ -524,7 +691,8 @@ def main():
             st.write(f"Daily Return Mean: {np.mean(returns)*100:.4f}%")
             st.write(f"Daily Return Std: {np.std(returns)*100:.4f}%")
             st.write(f"Volatility (Annualized): {np.std(returns)*np.sqrt(252)*100:.2f}%")
-            st.write(f"Sharpe Ratio: {(np.mean(returns)/np.std(returns))*np.sqrt(252):.2f}")
+            sharpe = (np.mean(returns)/np.std(returns))*np.sqrt(252) if np.std(returns) > 0 else 0
+            st.write(f"Sharpe Ratio: {sharpe:.2f}")
     
     # Section 2: Forecast
     st.header("🔮 Price Forecast")
@@ -659,8 +827,9 @@ def main():
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: white;'>
-        <p>💰 <b>Gold Price Forecast Pro</b> - Powered by Advanced Machine Learning</p>
-        <p><small>Data sources: Yahoo Finance | Models: XGBoost, LightGBM, Prophet, ARIMA, Random Forest & more</small></p>
+        <p>💰 <b>Gold Price Forecast Pro</b> - Powered by Advanced Machine Learning & Free APIs</p>
+        <p><small>🌐 APIs: Gold-API.com, ExchangeRate-API, Yahoo Finance (No Keys Required!)</small></p>
+        <p><small>🤖 Models: XGBoost, LightGBM, Prophet, ARIMA, Random Forest, Gradient Boosting & Ensemble</small></p>
         <p><small>⚠️ Disclaimer: Forecasts are for informational purposes only. Not financial advice.</small></p>
     </div>
     """, unsafe_allow_html=True)
