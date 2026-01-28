@@ -315,10 +315,10 @@ def train_ml_models(data, forecast_days=30):
     
     return forecasts, scores
 
-def create_price_chart(data, currency='USD', exchange_rate=1):
+def create_price_chart(data, currency='USD', exchange_rate=1, gram_multiplier=1):
     """Membuat grafik harga emas"""
     df = data.copy()
-    df['Price'] = df['Close'] * (exchange_rate if currency == 'IDR' else 1)
+    df['Price'] = df['Close'] * gram_multiplier * (exchange_rate if currency == 'IDR' else 1)
     
     fig = make_subplots(
         rows=2, cols=1,
@@ -331,9 +331,9 @@ def create_price_chart(data, currency='USD', exchange_rate=1):
     fig.add_trace(
         go.Candlestick(
             x=df.index,
-            open=df['Open'] * (exchange_rate if currency == 'IDR' else 1),
-            high=df['High'] * (exchange_rate if currency == 'IDR' else 1),
-            low=df['Low'] * (exchange_rate if currency == 'IDR' else 1),
+            open=df['Open'] * gram_multiplier * (exchange_rate if currency == 'IDR' else 1),
+            high=df['High'] * gram_multiplier * (exchange_rate if currency == 'IDR' else 1),
+            low=df['Low'] * gram_multiplier * (exchange_rate if currency == 'IDR' else 1),
             close=df['Price'],
             name='Price'
         ),
@@ -373,11 +373,11 @@ def create_price_chart(data, currency='USD', exchange_rate=1):
     
     return fig
 
-def create_forecast_chart(data, forecasts, currency='USD', exchange_rate=1):
+def create_forecast_chart(data, forecasts, currency='USD', exchange_rate=1, gram_multiplier=1):
     """Membuat grafik forecast"""
     fig = go.Figure()
     
-    historical_price = data['Close'].values * (exchange_rate if currency == 'IDR' else 1)
+    historical_price = data['Close'].values * gram_multiplier * (exchange_rate if currency == 'IDR' else 1)
     fig.add_trace(
         go.Scatter(
             x=data.index,
@@ -392,7 +392,7 @@ def create_forecast_chart(data, forecasts, currency='USD', exchange_rate=1):
     
     colors = ['red', 'green', 'orange', 'purple']
     for i, (name, pred) in enumerate(forecasts.items()):
-        forecast_price = np.array(pred) * (exchange_rate if currency == 'IDR' else 1)
+        forecast_price = np.array(pred) * gram_multiplier * (exchange_rate if currency == 'IDR' else 1)
         fig.add_trace(
             go.Scatter(
                 x=future_dates,
@@ -425,6 +425,33 @@ def main():
         st.header("⚙️ Settings")
         
         currency = st.selectbox("💱 Currency", ["USD", "IDR"])
+        
+        st.markdown("---")
+        st.markdown("### ⚖️ Gold Weight")
+        
+        weight_unit = st.radio(
+            "Unit",
+            ["Troy Ounce (default)", "Gram"],
+            help="1 Troy Ounce = 31.1035 grams"
+        )
+        
+        if weight_unit == "Gram":
+            gram_input = st.number_input(
+                "Enter grams",
+                min_value=0.1,
+                max_value=10000.0,
+                value=1.0,
+                step=0.1,
+                help="Masukkan berat emas dalam gram"
+            )
+            gram_multiplier = gram_input / 31.1035
+            st.info(f"📊 {gram_input}g = {gram_multiplier:.4f} Troy Oz")
+        else:
+            gram_multiplier = 1.0
+            st.info("1 Troy Ounce = 31.1035 grams")
+        
+        st.markdown("---")
+        
         period = st.selectbox("📅 Period", ["1mo", "3mo", "6mo", "1y", "2y"], index=3)
         forecast_days = st.slider("🔮 Forecast Days", 7, 60, 30)
         
@@ -458,6 +485,10 @@ def main():
     # Section 1: Current Price
     st.header("📈 Current Gold Price")
     
+    # Display weight info if using grams
+    if weight_unit == "Gram":
+        st.success(f"💎 Showing prices for **{gram_input} gram(s)** of gold")
+    
     col_info1, col_info2 = st.columns([3, 1])
     with col_info1:
         st.markdown(f"""
@@ -475,6 +506,11 @@ def main():
     change = current_price - prev_price
     change_pct = (change / prev_price) * 100 if prev_price != 0 else 0
     
+    # Apply gram multiplier
+    current_price = current_price * gram_multiplier
+    prev_price = prev_price * gram_multiplier
+    change = change * gram_multiplier
+    
     if currency == 'IDR':
         display_price = current_price * exchange_rate
         display_change = change * exchange_rate
@@ -486,28 +522,30 @@ def main():
     
     col1, col2, col3, col4 = st.columns(4)
     
+    weight_label = f"{gram_input}g" if weight_unit == "Gram" else "1 oz"
+    
     with col1:
         st.metric(
-            f"Current ({currency})",
+            f"Price ({weight_label} - {currency})",
             f"{curr_symbol}{display_price:,.2f}",
             f"{display_change:,.2f} ({change_pct:.2f}%)"
         )
     
     with col2:
-        st.metric("High (24h)", f"{curr_symbol}{data['High'].iloc[-1] * (exchange_rate if currency == 'IDR' else 1):,.2f}")
+        st.metric("High (24h)", f"{curr_symbol}{data['High'].iloc[-1] * gram_multiplier * (exchange_rate if currency == 'IDR' else 1):,.2f}")
     
     with col3:
-        st.metric("Low (24h)", f"{curr_symbol}{data['Low'].iloc[-1] * (exchange_rate if currency == 'IDR' else 1):,.2f}")
+        st.metric("Low (24h)", f"{curr_symbol}{data['Low'].iloc[-1] * gram_multiplier * (exchange_rate if currency == 'IDR' else 1):,.2f}")
     
     with col4:
         st.metric("USD/IDR", f"Rp{exchange_rate:,.2f}")
     
-    st.plotly_chart(create_price_chart(data, currency, exchange_rate), use_container_width=True)
+    st.plotly_chart(create_price_chart(data, currency, exchange_rate, gram_multiplier), use_container_width=True)
     
     # Statistics
     with st.expander("📊 Statistics"):
         col1, col2 = st.columns(2)
-        prices = data['Close'].values * (exchange_rate if currency == 'IDR' else 1)
+        prices = data['Close'].values * gram_multiplier * (exchange_rate if currency == 'IDR' else 1)
         
         with col1:
             st.write(f"Mean: {curr_symbol}{np.mean(prices):,.2f}")
@@ -555,7 +593,7 @@ def main():
         best_model = max(scores.items(), key=lambda x: x[1]['Accuracy'])
         st.info(f"🏆 Best: **{best_model[0]}** ({best_model[1]['Accuracy']:.2f}%)")
         
-        st.plotly_chart(create_forecast_chart(data, forecasts, currency, exchange_rate), use_container_width=True)
+        st.plotly_chart(create_forecast_chart(data, forecasts, currency, exchange_rate, gram_multiplier), use_container_width=True)
         
         st.subheader("📋 Forecast Table")
         
@@ -565,7 +603,7 @@ def main():
         forecast_df = pd.DataFrame({'Date': future_dates.strftime('%Y-%m-%d')})
         
         for name, pred in forecasts.items():
-            forecast_price = np.array(pred) * (exchange_rate if currency == 'IDR' else 1)
+            forecast_price = np.array(pred) * gram_multiplier * (exchange_rate if currency == 'IDR' else 1)
             forecast_df[f'{name} ({currency})'] = [f"{curr_symbol}{p:,.2f}" for p in forecast_price]
         
         st.dataframe(forecast_df, use_container_width=True, height=400)
@@ -578,8 +616,8 @@ def main():
         col1, col2, col3 = st.columns(3)
         
         ensemble_pred = forecasts['Ensemble']
-        final_pred = ensemble_pred[-1] * (exchange_rate if currency == 'IDR' else 1)
-        avg_pred = np.mean(ensemble_pred) * (exchange_rate if currency == 'IDR' else 1)
+        final_pred = ensemble_pred[-1] * gram_multiplier * (exchange_rate if currency == 'IDR' else 1)
+        avg_pred = np.mean(ensemble_pred) * gram_multiplier * (exchange_rate if currency == 'IDR' else 1)
         
         with col1:
             st.metric(f"Day {forecast_days}", f"{curr_symbol}{final_pred:,.2f}", f"{((final_pred - display_price) / display_price * 100):.2f}%")
@@ -588,7 +626,7 @@ def main():
             st.metric("Average", f"{curr_symbol}{avg_pred:,.2f}")
         
         with col3:
-            price_range = f"{curr_symbol}{np.min(ensemble_pred) * (exchange_rate if currency == 'IDR' else 1):,.0f} - {curr_symbol}{np.max(ensemble_pred) * (exchange_rate if currency == 'IDR' else 1):,.0f}"
+            price_range = f"{curr_symbol}{np.min(ensemble_pred) * gram_multiplier * (exchange_rate if currency == 'IDR' else 1):,.0f} - {curr_symbol}{np.max(ensemble_pred) * gram_multiplier * (exchange_rate if currency == 'IDR' else 1):,.0f}"
             st.metric("Range", price_range)
     
     st.markdown("---")
